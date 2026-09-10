@@ -87,14 +87,20 @@ export type HapticTrigger = (input?: HapticInput, options?: TriggerOptions) => P
 let registeredTrigger: HapticTrigger | null = null
 let lastSelectionAt = 0
 
-// Global rolling rate-limit. A runaway upstream loop (auth-expiry error-toast
-// storms, reconnect flaps) can request dozens of haptics a second, which the
-// trackpad actuator renders as a frantic "clickity" buzz. Cap firings to
-// RATE_LIMIT per RATE_WINDOW so no source can machine-gun the actuator;
-// intentional UI haptics are human-paced and never approach the ceiling.
+// Rolling rate-limit for AUTOMATIC haptics. A runaway upstream loop
+// (auth-expiry error-toast storms, reconnect flaps) can request dozens a
+// second, which the trackpad actuator renders as a frantic "clickity" buzz.
+// Cap those to RATE_LIMIT per RATE_WINDOW so no background source can
+// machine-gun the actuator.
 const RATE_WINDOW = 1000
 const RATE_LIMIT = 5
 let recentFires: number[] = []
+
+// Gesture-driven intents are exempt: one press is one haptic, and a person
+// hammering ⌘B or the sidebar button legitimately clears five a second — the
+// shared cap made rapid toggles go silent, which reads as the app breaking.
+// Storms come from notifications and stream events, which stay capped.
+const GESTURE_INTENTS = new Set<HapticIntent>(['cancel', 'close', 'crisp', 'open', 'selection', 'submit', 'tap'])
 
 export function registerHapticTrigger(trigger: HapticTrigger | null) {
   registeredTrigger = trigger
@@ -115,13 +121,15 @@ export function triggerHaptic(intent: HapticIntent = 'selection') {
     lastSelectionAt = now
   }
 
-  recentFires = recentFires.filter(t => now - t < RATE_WINDOW)
+  if (!GESTURE_INTENTS.has(intent)) {
+    recentFires = recentFires.filter(t => now - t < RATE_WINDOW)
 
-  if (recentFires.length >= RATE_LIMIT) {
-    return
+    if (recentFires.length >= RATE_LIMIT) {
+      return
+    }
+
+    recentFires.push(now)
   }
-
-  recentFires.push(now)
 
   const config = HAPTIC_INTENTS[intent]
 

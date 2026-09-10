@@ -936,6 +936,15 @@ def detect_provider_for_model(
     if not name:
         return None
 
+    # The current provider's LIVE catalog outranks every static guess: a model it already serves
+    # (Codex early-access ids, Portal-only slugs, Ollama Cloud models absent from _PROVIDER_MODELS)
+    # must never re-route the session to another vendor or to metered OpenRouter.
+    from hermes_cli.models_detect import current_provider_catalog_match
+
+    served = current_provider_catalog_match(name, current_provider)
+    if served is not None:
+        return (current_provider, served) if served != name else None
+
     static_match = detect_static_provider_for_model(name, current_provider)
     if static_match:
         return static_match
@@ -1985,6 +1994,9 @@ _OPENCODE_ZEN_FREE_BASE_URL = "https://opencode.ai/zen/v1"
 
 # ``-free``-suffixed slugs that are KEYED (Go-subscription) models, NOT anonymous-servable —
 # excluded from the keyless catalog despite the suffix (ox-alpha-free is Ox Alpha's Go twin).
+# The Go relay delisted ox-alpha-free (2026-09-09; GET /zen/go/v1/models omits it, POST → 401),
+# so it is gone from the opencode-go curated floor too — the exclusion stays so a stale live
+# list can never route it into the keyless catalog.
 _OPENCODE_FREE_KEYED_SUFFIX_MODELS = frozenset({"ox-alpha-free"})
 
 # In-process memo for _fetch_opencode_free_models(): (fetched_at, ids-or-None). Validation and

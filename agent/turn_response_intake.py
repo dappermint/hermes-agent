@@ -131,6 +131,13 @@ def normalize_model_response(
     if assistant_message.content is not None and not isinstance(assistant_message.content, str):
         assistant_message.content = _coerce_content_text(assistant_message.content)
 
+    # Some proxies drop tool_calls but leave the model's <tool_call> blocks in the text.
+    if not assistant_message.tool_calls and assistant_message.content:
+        from agent.acp_openai_bridge import extract_tool_calls_from_text
+        recovered, cleaned = extract_tool_calls_from_text(assistant_message.content)
+        if recovered:
+            assistant_message.tool_calls, assistant_message.content = recovered, cleaned
+
     # Agent-as-provider projection: splice the provider-agent's own tool work in as
     # call/result rows before this turn's assistant message; no-op for ordinary providers.
     splice_provider_projection(agent, response, messages)

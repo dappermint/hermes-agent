@@ -120,7 +120,7 @@ def _parse_tool_call(raw_json: str, ordinal: int) -> ChatCompletionMessageToolCa
         obj = json.loads(raw_json)
     except Exception:
         return None
-    named = _named_function(obj)
+    named = _named_function(obj) or _named_function({"function": obj})
     if named is None:
         return None
     fn, fn_name = named

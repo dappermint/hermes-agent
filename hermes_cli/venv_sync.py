@@ -370,7 +370,8 @@ def relaunch_command(
         if option in ("-W", "-X") and index < len(original):
             options.append(original[index])
             index += 1
-    prefix = f"import sys, runpy; sys.path.insert(0, {str(root)!r}); sys.argv = {argv!r}; "
+    bootstrap = "import hermes_bootstrap; " if (root / "hermes_bootstrap.py").exists() or (root / "hermes_bootstrap").exists() else ""
+    prefix = f"import sys, runpy; sys.path.insert(0, {str(root)!r}); {bootstrap}sys.argv = {argv!r}; "
     if argv[0] == "-c":
         body = f"exec({original[index + 1]!r})"
     elif module and module != "__main__":
@@ -378,7 +379,8 @@ def relaunch_command(
     else:
         # distlib .exe launchers are executable zip files with __main__, not
         # importable modules named '__main__'. run_path handles both shapes.
-        body = f"runpy.run_path({str(Path(argv[0]).absolute())!r}, run_name='__main__')"
+        script_dir = str(Path(argv[0]).resolve().parent)
+        body = f"sys.path.insert(0, {script_dir!r}); runpy.run_path({str(Path(argv[0]).absolute())!r}, run_name='__main__')"
     return [str(python), *options, "-I", "-c", prefix + body]
 
 

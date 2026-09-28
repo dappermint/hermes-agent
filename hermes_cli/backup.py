@@ -420,11 +420,13 @@ def verify_sqlite_integrity(
     if check_header:
         # Refused when a live connection exists (close() would cancel this process's POSIX locks
         # — see sqlite_safe_read); verification targets offline snapshots/backup artifacts anyway.
-        from hermes_cli.sqlite_safe_read import read_header_bytes_preopen
+        from hermes_cli.sqlite_safe_read import has_live_connection, read_header_bytes_preopen
         head = read_header_bytes_preopen(path, length=len(_SQLITE_HEADER))
-        if head is None:
+        # A refused read under our own live connection is not corruption: SQLite rejects a bad
+        # header on open, so the read-only probe below still catches the zeroed signature.
+        if head is None and not has_live_connection(path):
             return _done("cannot read header", size=size)
-        if head != _SQLITE_HEADER:
+        if head is not None and head != _SQLITE_HEADER:
             return _done(f"missing SQLite header magic (got {head[:16].hex()!r})", size=size)
     if max_bytes > 0 and size > max_bytes:
         # O(1) probe: the header check caught the zeroed signature; reading sqlite_master + page

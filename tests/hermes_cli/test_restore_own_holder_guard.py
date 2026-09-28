@@ -16,6 +16,7 @@ import pytest
 
 from hermes_cli import backup_restore as backup_restore_mod
 from hermes_cli import update_cmd
+from hermes_cli.backup import verify_sqlite_integrity
 from hermes_cli.sqlite_safe_read import connect_tracked
 
 
@@ -131,3 +132,26 @@ def test_update_autorestore_still_works_without_holder(tmp_path):
     assert update_cmd._restore_state_db_from_snapshot(dst, src) is True
     assert _read_marker(dst) == "snapshot-good"
     assert not dst.with_name(dst.name + "-wal").exists()
+
+
+def test_integrity_check_under_own_live_connection_is_not_corruption(tmp_path):
+    db = tmp_path / "state.db"
+    _make_db(db, "live")
+    held = connect_tracked(db, connect_fn=sqlite3.connect, check_same_thread=False)
+    try:
+        result = verify_sqlite_integrity(db, check_header=True, run_pragma=True)
+        assert result["valid"], result["message"]
+    finally:
+        held.close()
+
+
+def test_integrity_check_under_own_live_connection_still_catches_zeroed_header(tmp_path):
+    db = tmp_path / "state.db"
+    _make_db(db, "live")
+    held = connect_tracked(db, connect_fn=sqlite3.connect, check_same_thread=False)
+    try:
+        with open(db, "r+b") as fh:  # offline-fixture mutation, doomed file
+            fh.write(b"\x00" * 100)
+        assert not verify_sqlite_integrity(db, check_header=True, run_pragma=True)["valid"]
+    finally:
+        held.close()

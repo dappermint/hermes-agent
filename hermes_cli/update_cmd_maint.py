@@ -444,8 +444,10 @@ def _restore_state_db_from_snapshot(state_path: Path, snap_state: Path) -> bool:
             "handles (or restart Hermes) and retry."
         )
         return False
-    restored = verify_sqlite_integrity(state_path, check_header=True, run_pragma=True)
-    return bool(restored.get("valid"))
+    if not verify_sqlite_integrity(state_path, check_header=True, run_pragma=True).get("valid"):
+        print("  ✗ Auto-restore FAILED — restored copy also failed integrity")
+        return False
+    return True
 
 
 def _verify_and_restore_one_state_db(home: Path, *, label: str) -> None:
@@ -475,8 +477,6 @@ def _verify_and_restore_one_state_db(home: Path, *, label: str) -> None:
             try:
                 if _restore_state_db_from_snapshot(state_path, snap_state):
                     print(f"  ✓ Auto-restored from snapshot {snap_dir.name} ({label})")
-                else:
-                    print("  ✗ Auto-restore FAILED — restored copy also failed integrity")
             except OSError as exc:
                 print(f"  ✗ Auto-restore file copy failed: {exc}")
             return

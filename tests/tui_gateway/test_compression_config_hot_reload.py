@@ -317,3 +317,17 @@ def test_apply_live_compression_config_is_self_contained():
     _apply_live_compression_config(agent, {"compression": {"enabled": True}})
     assert agent.compression_enabled is True
     assert agent.codex_responses_native_compaction is False
+
+
+def test_plugin_context_engine_is_left_to_its_own_policy(monkeypatch):
+    # A plugin engine is not a ContextCompressor: it has none of the compressor's private
+    # helpers, and construction never hands it these keys.
+    engine = SimpleNamespace(name="plugin", threshold_tokens=123)
+    session = {"agent": SimpleNamespace(
+        model="m", provider="", context_compressor=engine, compression_enabled=True,
+        compression_idle_compact_after_seconds=0, codex_responses_native_compaction=False,
+        codex_responses_compact_threshold=200_000,
+    )}
+    _sync_with_cfg(monkeypatch, session, {"compression": {"threshold_tokens": 50_000, "tail_mode": "legacy"}})
+    assert engine.threshold_tokens == 123
+    assert not hasattr(engine, "tail_mode")

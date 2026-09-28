@@ -114,7 +114,9 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
     with contextlib.suppress(TypeError, ValueError):
         agent.compression_idle_compact_after_seconds = max(0, int(compression.get("idle_compact_after_seconds", 0) or 0))
     cc = getattr(agent, "context_compressor", None)
-    if cc is None:
+    from agent.context_compressor import ContextCompressor
+    # Plugin engines own compaction policy; construction never hands them these keys either.
+    if not isinstance(cc, ContextCompressor):
         return
     # tail_mode: unknown/absent values land on the ctor default ("lean"), matching agent_init.
     default_tail = str(_compressor_ctor_default("tail_mode", "lean"))

@@ -65,8 +65,8 @@ while [ $# -gt 0 ]; do
             echo "                  [--non-interactive] [--include-desktop] [--verbose]"
             echo "                  [--skip-browser] [--skip-computer-use]"
             echo
-            echo "  --skip-browser  Do not install the browser tools (agent-browser + Chromium,"
-            echo "                  Browser Use CLI). Alias: --no-playwright. Remembered by later"
+            echo "  --skip-browser  Do not install the browser tools (agent-browser + Chromium)."
+            echo "                  Alias: --no-playwright. Remembered by later"
             echo "                  installs and 'hermes update'; undo with 'hermes pm install agent-browser'."
             echo "  --skip-computer-use"
             echo "                  Do not install the computer-use driver (cua-driver). Remembered"
@@ -463,6 +463,17 @@ stage_repository() {
         # Explicit refspec: a tag-pinned --single-branch checkout from an older
         # installer maps only the tag, so a by-name fetch writes FETCH_HEAD and
         # never the origin/$BRANCH everything below resolves (#125112).
+        # git 2.53+ aborts fetches into a partial clone whose packs lack a .promisor
+        # marker (#124272), and an install stuck there never fetches the updater that
+        # heals it. Marking is idempotent and never rewrites objects.
+        if [ "$(git -C "$INSTALL_DIR" config --bool --get remote.origin.promisor)" = true ]; then
+            local pack
+            for pack in "$INSTALL_DIR"/.git/objects/pack/pack-*.pack; do
+                if [ -f "$pack" ] && [ ! -e "${pack%.pack}.promisor" ]; then
+                    : > "${pack%.pack}.promisor" || log_warn "could not mark $pack as a partial-clone pack"
+                fi
+            done
+        fi
         run_logged "Fetching origin/$BRANCH" git -C "$INSTALL_DIR" fetch origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" \
             || fail "git fetch failed"
         local stamp

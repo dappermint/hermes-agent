@@ -282,3 +282,21 @@ def test_nested_dist_travels_but_root_dist_stays_out(tmp_path):
 
     assert (destination / "plugins/kanban/dashboard/dist/index.js").read_text(encoding="utf-8") == "ENTRY\n"
     assert not (destination / "dist").exists(), "root build output never enters the snapshot"
+
+
+def test_gitignored_plugin_state_does_not_change_members_stamp(tmp_path):
+    """A plugin rewriting its gitignored state.json must not mark the venv stale on every launch."""
+    plugin = tmp_path / "titler"
+    (plugin / "titler").mkdir(parents=True)
+    (plugin / "pyproject.toml").write_text('[project]\nname="titler"\nversion="1"\n', encoding="utf-8")
+    (plugin / "plugin.yaml").write_text("name: titler\n", encoding="utf-8")
+    (plugin / "titler/__init__.py").write_text("", encoding="utf-8")
+    (plugin / ".gitignore").write_text("# runtime\nstate.json\nout/\n", encoding="utf-8")
+    (plugin / "state.json").write_text("{}", encoding="utf-8")
+
+    before = workspace.members_stamp([plugin])
+    (plugin / "state.json").write_text('{"titled": 1}', encoding="utf-8")
+    assert workspace.members_stamp([plugin]) == before
+
+    (plugin / "titler/__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    assert workspace.members_stamp([plugin]) != before, "real source edits still re-sync"

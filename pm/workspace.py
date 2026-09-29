@@ -23,8 +23,30 @@ from pm.plugin_declarations import read_python_declaration, manifest_version_err
 _MEMBER_EXCLUDE = frozenset({".git", ".venv", "venv", "node_modules", "__pycache__"})
 
 
+def _gitignored_names(directory) -> list[str]:
+    # ponytail: basename patterns from this directory's own .gitignore only; negations, anchored
+    # sub-paths and parent .gitignores are skipped. Swap in `git check-ignore` if a plugin needs them.
+    try:
+        lines = (Path(directory) / ".gitignore").read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return []
+    patterns = []
+    for line in lines:
+        line = line.strip().strip("/")
+        if line and not line.startswith(("#", "!")) and "/" not in line:
+            patterns.append(line)
+    return patterns
+
+
 def _member_ignored(directory, names):
-    return [name for name in names if name in _MEMBER_EXCLUDE or name.endswith(".egg-info")]
+    """A plugin's runtime state (state.json, caches) must not read as a changed build input,
+    or every write it makes marks the venv stale and each launch re-syncs dependencies."""
+    import fnmatch
+
+    ignored = _gitignored_names(directory)
+    return [name for name in names
+            if name in _MEMBER_EXCLUDE or name.endswith(".egg-info")
+            or any(fnmatch.fnmatch(name, pattern) for pattern in ignored)]
 
 
 # The uv failure classifier lives beside the uv runner (stdlib-only imports): the bootstrap

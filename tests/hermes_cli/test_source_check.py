@@ -542,3 +542,18 @@ def test_branch_tip_failure_names_the_cause(installation):
     status = check_for_updates(install_root=root, home=home, force=True)
     assert status["error"] == "fetch-failed"
     assert "HTTP 503" in status["message"]
+
+
+def test_update_in_place_parked_branch_checks_the_target_not_itself(installation):
+    """With update_in_place the updater merges origin/main into the parked branch, so the
+    check must compare against main, never ask the remote for a branch it will not have."""
+    from hermes_cli.source_check import check_for_updates
+
+    root, linked, home, base, head, responses, requests, git = installation
+    responses["/repos/fixture/fork/commits/main"] = (200, head)
+    (home / "config.yaml").write_text("updates:\n  parked_branch_strategy: update_in_place\n")
+    status = check_for_updates(install_root=linked, home=home, channel="main")
+    assert "error" not in status, status
+    assert status["branch"] == "main"
+    assert status["currentBranch"] == "feature/gui"
+    assert "/repos/fixture/fork/commits/feature%2Fgui" not in requests

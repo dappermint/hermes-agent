@@ -13,7 +13,8 @@ import {
   LIVE_TURN_EVENT_SILENCE_MS,
   noteSessionEvent,
   publishSessionState,
-  SESSION_WATCHDOG_TIMEOUT_MS
+  SESSION_WATCHDOG_TIMEOUT_MS,
+  setLiveTurnProbe
 } from './session-states'
 
 // Read from the store rather than restated here: these assert what happens on
@@ -268,5 +269,42 @@ describe('live turn event silence', () => {
 
     expect($sessionStates.get()['rt-done']?.messages.some(message => message.errorSurface)).toBe(false)
     expect($workingSessionIds.get()).not.toContain('s-done')
+  })
+
+  describe('with a backend liveness probe', () => {
+    afterEach(() => setLiveTurnProbe(null))
+
+    it('keeps a silent turn live while the backend still reports it working', async () => {
+      setLiveTurnProbe(async () => true)
+      publishSessionState('rt-quiet', partial('waiting on a tool', { storedSessionId: 's-quiet' }))
+      noteSessionEvent('rt-quiet')
+
+      await vi.advanceTimersByTimeAsync(SILENCE_MS)
+
+      expect($sessionStates.get()['rt-quiet']?.busy).toBe(true)
+      expect($sessionStates.get()['rt-quiet']?.messages.some(message => message.errorSurface)).toBe(false)
+    })
+
+    it('settles when the backend no longer lists the turn', async () => {
+      setLiveTurnProbe(async () => false)
+      $activeSessionId.set('rt-gone')
+      publishSessionState('rt-gone', partial('cut', { storedSessionId: 's-gone' }))
+      noteSessionEvent('rt-gone')
+
+      await vi.advanceTimersByTimeAsync(SILENCE_MS)
+
+      expect($sessionStates.get()['rt-gone']?.busy).toBe(false)
+      expect($sessionStates.get()['rt-gone']?.messages.some(message => message.errorSurface?.retryable)).toBe(true)
+    })
+
+    it('settles when the probe hangs past its deadline', async () => {
+      setLiveTurnProbe(() => new Promise<boolean>(() => {}))
+      publishSessionState('rt-hang', partial('dead socket', { storedSessionId: 's-hang' }))
+      noteSessionEvent('rt-hang')
+
+      await vi.advanceTimersByTimeAsync(SILENCE_MS + 10_000)
+
+      expect($sessionStates.get()['rt-hang']?.busy).toBe(false)
+    })
   })
 })

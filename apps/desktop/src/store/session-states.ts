@@ -302,9 +302,11 @@ export function foregroundSessionScopes(): Set<string> {
 
     if (typeof owner === 'string') {
       const key = normalizeProfileKey(owner)
+
       if (key) {
         scopes.add(key)
       }
+
       return
     }
 
@@ -320,6 +322,7 @@ export function foregroundSessionScopes(): Set<string> {
 
     if (scope) {
       scopes.add(scope)
+
       return
     }
 
@@ -452,6 +455,49 @@ function withSilentTurnRetry(messages: ChatMessage[], streamId: string | null): 
   ]
 }
 
+// Silence alone is not proof of death: a quiet tool call (process wait,
+// subagent) emits nothing, and the backstop poll that would reset the clock
+// pauses while the window is unfocused. Ask the backend before settling; a
+// probe that fails or hangs past the deadline still settles.
+type LiveTurnProbe = (runtimeId: string) => Promise<boolean>
+let liveTurnProbe: LiveTurnProbe | null = null
+const LIVE_TURN_PROBE_TIMEOUT_MS = 10_000
+
+export function setLiveTurnProbe(probe: LiveTurnProbe | null) {
+  liveTurnProbe = probe
+}
+
+async function backendStillWorking(runtimeId: string, probe: LiveTurnProbe): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+
+  const deadline = new Promise<boolean>(resolve => {
+    timer = setTimeout(() => resolve(false), LIVE_TURN_PROBE_TIMEOUT_MS)
+  })
+
+  try {
+    return await Promise.race([probe(runtimeId).catch(() => false), deadline])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function settleSilentLiveTurnUnlessWorking(runtimeId: string, probe: LiveTurnProbe) {
+  if (!isLiveTurnAwaitingEvents($sessionStates.get()[runtimeId])) {
+    return
+  }
+
+  if (await backendStillWorking(runtimeId, probe)) {
+    noteSessionEvent(runtimeId)
+
+    return
+  }
+
+  // An event that arrived during the probe re-armed the clock; it owns the turn now.
+  if (!sessionEventSilenceTimers.has(runtimeId)) {
+    settleSilentLiveTurn(runtimeId)
+  }
+}
+
 function settleSilentLiveTurn(runtimeId: string) {
   const current = $sessionStates.get()[runtimeId]
 
@@ -492,7 +538,12 @@ export function noteSessionEvent(runtimeId: string) {
     runtimeId,
     setTimeout(() => {
       sessionEventSilenceTimers.delete(runtimeId)
-      settleSilentLiveTurn(runtimeId)
+
+      if (liveTurnProbe) {
+        void settleSilentLiveTurnUnlessWorking(runtimeId, liveTurnProbe)
+      } else {
+        settleSilentLiveTurn(runtimeId)
+      }
     }, LIVE_TURN_EVENT_SILENCE_MS)
   )
 }

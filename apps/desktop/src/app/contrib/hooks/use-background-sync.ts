@@ -42,6 +42,7 @@ import {
   noteSessionEvent,
   publishSessionState,
   SESSION_WATCHDOG_TIMEOUT_MS,
+  setLiveTurnProbe,
   setSessionStalled
 } from '@/store/session-states'
 import { loadArchivedSessions } from '@/store/sidebar-archive'
@@ -1117,6 +1118,18 @@ export function useBackgroundSync({
 
     const unsubscribe = $sessionsChangeTick.listen(() => void refreshLiveStatuses())
 
+    // ponytail: probes the foreground profile's backend only; a silent turn on
+    // a background profile still settles on silence alone.
+    setLiveTurnProbe(async runtimeId => {
+      const response = await requestGateway<LiveSessionStatusResponse>('session.active_list', {})
+
+      return Boolean(
+        response.sessions?.some(
+          session => session.id?.trim() === runtimeId && (session.status === 'working' || session.status === 'waiting')
+        )
+      )
+    })
+
     const dispose = visiblePoll(
       changeEventsAvailable ? LIVE_SESSION_STATUS_BACKSTOP_INTERVAL_MS : LIVE_SESSION_STATUS_POLL_INTERVAL_MS,
       () => void refreshLiveStatuses()
@@ -1127,6 +1140,7 @@ export function useBackgroundSync({
     return () => {
       cancelled = true
       unsubscribe()
+      setLiveTurnProbe(null)
       dispose()
     }
     // Keep the in-flight guard alive across change ticks; a slow response must

@@ -720,6 +720,9 @@ export const ru = defineLocale({
       system: { label: 'Системная', description: 'Следовать настройкам ОС' }
     },
     appearance: {
+      chatTextScaleTitle: 'Размер текста чата',
+      chatTextScaleDesc:
+        'Масштабирует текст беседы и поле ввода относительно масштаба интерфейса. Размер боковых панелей и элементов управления не меняется.',
       title: 'Внешний вид',
       intro: 'Только для приложения. Режим — это яркость, тема — палитра и оформление чата.',
       colorMode: 'Цветовой режим',
@@ -3613,6 +3616,10 @@ export const ru = defineLocale({
       editModels: 'Изменить модели…',
       followDefault: 'Использовать модель по умолчанию из настроек',
       refreshModels: 'Обновить модели',
+      favorites: 'Избранное',
+      addFavorite: 'Добавить в избранное',
+      removeFavorite: 'Убрать из избранного',
+      favoriteShortcut: '⇧ Клик',
       fast: 'Быстрая',
       free: 'бесплатно',
       cacheRead: 'чтение из кэша',

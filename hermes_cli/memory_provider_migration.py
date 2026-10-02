@@ -17,12 +17,18 @@ the user gets the exact one-liner instead of silently running without memory.
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 _attempted: set[tuple[str, str]] = set()
+
+# Providers that shipped bundled in core. Unattended consent covers only these: their users already
+# accepted the deps when they picked the built-in. Any other catalog plugin named in memory.provider
+# (a synced config, a cloned profile) still needs an explicit install.
+_LEFT_CORE = frozenset({"hindsight", "honcho", "mem0", "supermemory", "openviking", "retaindb", "byterover", "holographic"})
 
 
 def configured_provider(home: Path) -> str:
@@ -80,13 +86,26 @@ def migrate_home(home: Path, *, install: Callable[[str], dict], say: Callable[[s
     return None
 
 
+def _unattended_consent() -> bool:
+    """Without a terminal (Desktop, gateway, ``hermes update`` from a script) nobody can answer the
+    dependency prompt, so every provider that declares Python deps would fail to migrate. The
+    configured ``memory.provider`` plus ``security.allow_lazy_installs`` (read for the home being
+    migrated) is the same consent that let the bundled provider install its deps on demand; with a
+    terminal the user is still asked."""
+    from pm.install import lazy_installs_allowed
+
+    interactive = sys.stdin is not None and sys.stdout is not None and sys.stdin.isatty() and sys.stdout.isatty()
+    return not interactive and lazy_installs_allowed()
+
+
 def _install_into(home: Path) -> Callable[[str], dict]:
     def _install(name: str) -> dict:
         from hermes_cli.plugins_cmd import dashboard_install_plugin
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
         token = set_hermes_home_override(home)
         try:
-            return dashboard_install_plugin("", force=False, enable=True, catalog_name=name)
+            return dashboard_install_plugin("", force=False, enable=True, catalog_name=name,
+                                            assume_deps_consent=name in _LEFT_CORE and _unattended_consent())
         finally:
             reset_hermes_home_override(token)
     return _install

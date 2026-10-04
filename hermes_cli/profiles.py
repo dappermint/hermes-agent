@@ -148,6 +148,9 @@ def _clone_all_copytree_ignore(source_dir: Path):
     return _ignore
 
 
+# OS credential dirs (file_safety.build_write_denied_prefixes) + direnv .envrc (_BLOCKED_PROJECT_ENV_BASENAMES).
+_OS_CREDENTIAL_STORES = (".ssh", ".aws", ".gnupg", ".kube", ".envrc")
+
 # Credential stores in a profile home, as paths relative to it, plus the directories where Hermes
 # keeps recovery copies of them. Never shipped in a profile export, and user-owned (never
 # overwritten) on a distribution install. Add a store here when a writer or loader starts using one.
@@ -179,6 +182,7 @@ PROFILE_CREDENTIAL_PATHS = frozenset({
     "chrome-debug",                 # /browser connect Chrome profile (cookies, logins)
     "home",                         # subprocess HOME: gh, git, ssh, npm and skill-CLI credentials
     "backups", "state-snapshots",   # pre-update zips, config copies, update snapshots of the stores
+    *_OS_CREDENTIAL_STORES,
 })
 _CREDENTIAL_PATH_PARTS = tuple(tuple(p.casefold().split("/")) for p in PROFILE_CREDENTIAL_PATHS)
 
@@ -2227,9 +2231,10 @@ def _default_export_ignore(root_dir: Path):
     """
 
     def _ignore(directory: str, contents: list) -> set:
-        # Universal exclusions (any depth) plus npm lockfiles that can appear at root.
+        # Universal exclusions and credential names (any depth) plus npm lockfiles that can appear at root.
         ignored = _non_exportable_entries(directory, contents)
         ignored.update({"package.json", "package-lock.json"} & set(contents))
+        ignored.update(_EXPORT_CREDENTIAL_FILES & set(contents))
         if Path(directory) == root_dir:
             ignored.update(entry for entry in contents if entry not in _DEFAULT_EXPORT_INCLUDE_ROOT)
         return ignored
@@ -2237,10 +2242,11 @@ def _default_export_ignore(root_dir: Path):
     return _ignore
 
 
-# Credential names dropped at ANY depth of a named-profile export, on top of the root-relative
+# Credential names dropped at ANY depth of every profile export, on top of the root-relative
 # PROFILE_CREDENTIAL_PATHS. ``bot-desktop`` is the screen's runtime state:
 # its persistent Chromium profile (Cookies, Login Data — the bot's live web sessions), Xauthority, sockets.
-_EXPORT_CREDENTIAL_FILES = frozenset({"auth.json", ".env", "bot-desktop"})
+# The OS stores are dropped wherever they sit (a skill dir copied from a home carries its ``.ssh``).
+_EXPORT_CREDENTIAL_FILES = frozenset({"auth.json", ".env", "bot-desktop", *_OS_CREDENTIAL_STORES})
 
 # Text/config suffixes secret-scrubbed on export; binary DBs, images etc. are left alone.
 _EXPORT_REDACT_SUFFIXES = frozenset({

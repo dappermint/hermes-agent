@@ -651,7 +651,7 @@ class TestFetchNewMessages(unittest.TestCase):
         mock_imap.uid.side_effect = uid_handler
 
         with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
-            results = adapter._fetch_new_messages()
+            results = adapter._fetch_new_messages(lambda _c: True)
 
         # Only UID 3 should be fetched (1 and 2 already seen)
         self.assertEqual(len(results), 1)
@@ -673,6 +673,10 @@ class TestPollLoop(unittest.TestCase):
         }):
             from plugins.platforms.email.adapter import EmailAdapter
             adapter = EmailAdapter(PlatformConfig(enabled=True))
+        # _check_inbox gates every UID on _sender_accepted before the RFC822 fetch; authorize the
+        # unauthenticated test senders so these tests exercise the fetch/dispatch loop itself.
+        adapter._is_sender_authorized = lambda *a, **k: True
+        adapter._require_authenticated_sender = False
         return adapter
 
     def test_check_inbox_dispatches_messages(self):
@@ -707,6 +711,88 @@ class TestPollLoop(unittest.TestCase):
 
         self.assertEqual(len(dispatched), 1)
         self.assertEqual(dispatched[0]["subject"], "Inbox Test")
+
+    def test_rejected_sender_is_not_full_fetched_before_authorization(self):
+        """A header-only, bounded preflight rejects a forged lower auth result
+        before IMAP returns the MIME body or an attachment is decoded."""
+        import asyncio
+        from plugins.platforms.email.adapter import _MAX_PREAUTH_HEADER_BYTES
+
+        adapter = self._make_adapter()
+        adapter._require_authenticated_sender = True
+        adapter._authserv_id = "mx.trusted.test"
+        dispatched, fetch_specs = [], []
+
+        async def capture(msg_data):
+            dispatched.append(msg_data)
+
+        adapter._dispatch_message = capture
+        forged_headers = (
+            b"From: Owner <owner@example.com>\r\n"
+            b"Subject: forged lower result\r\n"
+            b"Message-ID: <forged@example.com>\r\n"
+            b"Authentication-Results: edge.receiver.test; dmarc=fail header.from=example.com\r\n"
+            b"Authentication-Results: mx.trusted.test; dmarc=pass header.from=example.com\r\n"
+            b"Content-Type: multipart/mixed; boundary=x\r\n\r\n"
+        )
+        trusted_headers = (
+            b"From: Owner <owner@example.com>\r\n"
+            b"Subject: trusted result\r\n"
+            b"Message-ID: <trusted@example.com>\r\n"
+            b"Authentication-Results: mx.trusted.test; dmarc=pass header.from=example.com\r\n"
+            b"Content-Type: text/plain\r\n\r\n"
+        )
+        oversized_headers = (
+            b"From: Owner <owner@example.com>\r\nAuthentication-Results: mx.trusted.test; "
+            + b"x" * _MAX_PREAUTH_HEADER_BYTES
+        )
+        headers = {b"9": forged_headers, b"10": trusted_headers, b"11": oversized_headers}
+        full_messages = {
+            b"9": forged_headers + (
+                b"--x\r\nContent-Disposition: attachment; filename=payload.bin\r\n\r\n"
+                + b"x" * 200_000 + b"\r\n--x--\r\n"
+            ),
+            b"10": trusted_headers + b"authorized body",
+            b"11": oversized_headers + b"unauthorized body",
+        }
+        mock_imap = MagicMock()
+
+        def uid_handler(command, *args):
+            if command == "search":
+                return ("OK", [b"9 10 11"])
+            if command == "fetch":
+                uid, spec = args
+                fetch_specs.append((uid, spec))
+                payload = headers[uid] if "BODY.PEEK[HEADER.FIELDS" in spec else full_messages[uid]
+                return ("OK", [(uid, payload)])
+            if command == "store":
+                return ("OK", [b""])
+            return ("NO", [])
+
+        mock_imap.uid.side_effect = uid_handler
+        gates, fetch = [], adapter._fetch_new_messages
+        adapter._fetch_new_messages = lambda gate: (gates.append(gate), fetch(gate))[1]
+        with patch.dict(os.environ, {
+            "EMAIL_ALLOWED_USERS": "owner@example.com",
+            "EMAIL_ALLOW_ALL_USERS": "",
+            "GATEWAY_ALLOWED_USERS": "",
+            "GATEWAY_ALLOW_ALL_USERS": "",
+        }, clear=False), patch("imaplib.IMAP4_SSL", return_value=mock_imap), patch(
+            "plugins.platforms.email.adapter._extract_attachments", return_value=[],
+        ) as extract_attachments:
+            asyncio.run(adapter._check_inbox())
+
+        self.assertEqual([message["message_id"] for message in dispatched], ["<trusted@example.com>"])
+        self.assertNotIn((b"9", "(RFC822)"), fetch_specs)
+        self.assertNotIn((b"11", "(RFC822)"), fetch_specs)
+        self.assertIn((b"10", "(RFC822)"), fetch_specs)
+        header_specs = [spec for _, spec in fetch_specs if "BODY.PEEK[HEADER.FIELDS" in spec]
+        self.assertEqual(len(header_specs), 3)
+        self.assertTrue(all(f"<0.{_MAX_PREAUTH_HEADER_BYTES + 1}>" in spec for spec in header_specs))
+        extract_attachments.assert_called_once()
+        self.assertTrue({b"9", b"10", b"11"}.issubset(adapter._seen_uids))
+        # Once the poll's loop is closed (stop race) the gate fails closed instead of raising.
+        self.assertFalse(gates[0](dispatched[0]))
 
     def test_check_inbox_notifies_fatal_error_on_fetch_failure(self):
         """A failed IMAP check must surface through the fatal-error hook so
@@ -763,7 +849,7 @@ class TestPollLoop(unittest.TestCase):
                 return ("OK", [b"1 2"])
             if command == "fetch":
                 fetches.append(args)
-                if len(fetches) == 1:
+                if args[0] == b"1":
                     return ("OK", [(b"1", raw_email.as_bytes())])
                 raise OSError("connection dropped mid-batch")
             return ("NO", [])
@@ -799,7 +885,7 @@ class TestPollLoop(unittest.TestCase):
                 return ("OK", [b"1 2 3"])
             if command == "fetch":
                 fetches.append(args)
-                if len(fetches) == 1:
+                if args[0] == b"1":
                     return ("OK", [(b"1", raw_email.as_bytes())])
                 raise OSError("connection dropped")
             return ("NO", [])
@@ -807,7 +893,7 @@ class TestPollLoop(unittest.TestCase):
         mock_imap.uid.side_effect = uid_handler
 
         with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
-            results = adapter._fetch_new_messages()
+            results = adapter._fetch_new_messages(lambda _c: True)
 
         self.assertEqual(len(results), 1)
         self.assertIn(b"1", adapter._seen_uids)     # fetched → seen
@@ -833,6 +919,8 @@ class TestPollLoop(unittest.TestCase):
                 return ("OK", [b"1 2"])
             if command == "fetch":
                 uid = args[0]
+                if "BODY.PEEK" in args[1]:
+                    return ("OK", [(uid, good_email.as_bytes())])
                 if uid == b"1":
                     return ("OK", [(b"1", b"poison")])
                 return ("OK", [(b"2", good_email.as_bytes())])
@@ -844,7 +932,7 @@ class TestPollLoop(unittest.TestCase):
             "plugins.platforms.email.adapter.EmailAdapter._parse_fetched_message",
             side_effect=[ValueError("unparseable"), {"subject": "good"}],
         ):
-            results = adapter._fetch_new_messages()
+            results = adapter._fetch_new_messages(lambda _c: True)
 
         # Poison message consumed (seen, skipped); good message survived.
         self.assertEqual(len(results), 1)
@@ -1036,7 +1124,7 @@ class TestImapConnectionCleanup(unittest.TestCase):
         mock_imap.uid.side_effect = uid_handler
 
         with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
-            results = adapter._fetch_new_messages()
+            results = adapter._fetch_new_messages(lambda _c: True)
 
         self.assertEqual(results, [])
         mock_imap.logout.assert_called_once()
@@ -1284,21 +1372,31 @@ class TestSenderAuthentication(unittest.TestCase):
         self.assertFalse(ok, reason)
 
 
-    def test_injected_header_below_trusted_does_not_authenticate(self):
-        """An attacker-injected Authentication-Results sorts BELOW the receiving
-        server's. With authserv-id pinning, only the trusted (first) header is
-        consulted, so a forged 'dmarc=pass' lower in the stack is ignored."""
+    def test_only_topmost_exact_authserv_id_is_trusted(self):
+        """Never search below the authoritative field or relax an authserv-id pin.
+        The subdomain and comment-smuggled rows carry dmarc=pass, so only the exact pin rejects them."""
+        forged_lower = "mx.ourserver.com; dmarc=pass header.from=example.com"
+        for topmost in (
+            "mx.ourserver.com; dmarc=fail header.from=example.com",
+            "edge.receiver.test; dmarc=fail header.from=example.com",
+            "child.mx.ourserver.com; dmarc=pass header.from=example.com",
+            "(mx.ourserver.com) edge.receiver.test; dmarc=pass header.from=example.com",
+        ):
+            with self.subTest(topmost=topmost):
+                ok, reason = self._verify(
+                    "admin@example.com", [topmost, forged_lower],
+                    authserv_id="mx.ourserver.com",
+                )
+                self.assertFalse(ok, reason)
+
+        # Matching remains case-insensitive and accepts RFC 8601 CFWS comments,
+        # including a semicolon inside a nested comment.
         ok, reason = self._verify(
             "admin@example.com",
-            [
-                # Trusted: stamped by our server, real verdict = fail
-                "mx.ourserver.com; dmarc=fail header.from=example.com",
-                # Forged by attacker, claims pass
-                "mx.ourserver.com; dmarc=pass header.from=example.com",
-            ],
+            ["MX.OURSERVER.COM (receiver (a;b)); dmarc=pass header.from=example.com"],
             authserv_id="mx.ourserver.com",
         )
-        self.assertFalse(ok, reason)
+        self.assertTrue(ok, reason)
 
 
 def test_oversized_cron_output_is_delivered_as_one_whole_email():

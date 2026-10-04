@@ -12,7 +12,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from agent.image_eviction_policy import outbound_image_retire_count
 from agent.compression_marker import (
@@ -1701,6 +1701,10 @@ def _sum_terminal(name, args, content, content_len, line_count):
 
 
 def _sum_write_file(name, args, content, content_len, line_count):
+    # A refused write (stale-write guard, sensitive path, I/O error) changed nothing; summarized as
+    # "wrote to" it compresses into a success the post-compaction agent then reports.
+    if failed := _result_failure_suffix(content):
+        return f"[write_file] {args.get('path', '?')}{failed}"
     written_lines = _str_arg(args, "content").count("\n") + 1 if args.get("content") else "?"
     return f"[write_file] wrote to {args.get('path', '?')} ({written_lines} lines)"
 
@@ -2010,10 +2014,36 @@ def _json_dict(text: Any) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _summarize_refused_tool_result(tool_name: str, args: dict, content: str) -> "str | None":
+    """Summary for a call an approval or write guard refused (``BLOCKED: ...`` / ``status``
+    ``blocked``/``pending_approval``), else None. The per-tool summarizers describe the call as done
+    ("ran ...", "wrote to ..."), which would turn a user's denial into a record of the action and
+    drop the "do not retry" instruction. Strictly below _PRUNE_MIN_CHARS, like the clarify summary,
+    so later prune passes keep it."""
+    payload = _json_dict(content)
+    status = payload.get("status")
+    error = payload.get("error") if isinstance(payload.get("error"), str) else ""
+    if not error and content.lstrip().startswith("BLOCKED"):
+        error = content.strip()
+    if status == "pending_approval":
+        outcome = "awaiting the user's approval, not run"
+    elif error and (status == "blocked" or error.lstrip().startswith("BLOCKED")):
+        outcome = "BLOCKED, not run"
+        if "NOT consented" in error:
+            outcome += "; the user did NOT consent, do not retry or reach the same outcome another way"
+    else:
+        return None
+    target = _str_arg(args, "command") or _str_arg(args, "path")
+    target = f" `{target if len(target) <= 60 else target[:57] + '...'}`" if target else ""
+    return f"[{tool_name}]{target} {outcome}"[:_PRUNE_MIN_CHARS - 1]
+
+
 def _summarize_tool_result_unguarded(tool_name: str, tool_args: str, tool_content: str) -> str:
     """Build the summary line (unguarded; see ``_summarize_tool_result``)."""
     args = _json_dict(tool_args)
     content = tool_content or ""
+    if (refused := _summarize_refused_tool_result(tool_name, args, content)) is not None:
+        return refused
     content_len = len(content)
     line_count = content.count("\n") + 1 if content.strip() else 0
     summarizer = _TOOL_RESULT_SUMMARIZERS.get(tool_name)
@@ -3185,21 +3215,25 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         ``cut_at_break``. Only the newest assistant turn's thinking is charged (#73624) unless the route
         echoes stale thinking every turn — must agree with the preflight estimate (#84371)."""
         n = len(messages)
-        newest_asst_idx = _last_assistant_index(messages)
-        charge_all_thinking = self._stale_thinking_on_wire()
-        native_budget = self._native_anthropic_budget()
+        price = self._tail_row_pricer(messages)
         accumulated = 0
         cut = n  # start from beyond the end
         for i in range(n - 1, head_end - 1, -1):
-            msg_tokens = (
-                native_budget(messages[i]) if native_budget
-                else _estimate_msg_budget_tokens(messages[i], charge_all_thinking or i == newest_asst_idx)
-            )
+            msg_tokens = price(i)
             if accumulated + msg_tokens > ceiling and (n - i) >= min_tail:
                 return (i if cut_at_break else cut), accumulated
             accumulated += msg_tokens
             cut = i
         return cut, accumulated
+
+    def _tail_row_pricer(self, messages: List[Dict[str, Any]]) -> Callable[[int], int]:
+        """Per-row tail price ``index -> tokens``: the walk's accounting, shared by every gate that sizes a tail region."""
+        newest_asst_idx = _last_assistant_index(messages)
+        charge_all_thinking = self._stale_thinking_on_wire()
+        native_budget = self._native_anthropic_budget()
+        if native_budget:
+            return lambda i: native_budget(messages[i])
+        return lambda i: _estimate_msg_budget_tokens(messages[i], charge_all_thinking or i == newest_asst_idx)
 
     def _prune_boundary(
         self, result: List[Dict[str, Any]], protect_tail_count: int, protect_tail_tokens: int | None,
@@ -4525,11 +4559,12 @@ Write only the summary body. Do not include any preamble or prefix."""
                 continue
             if len(text) > _ACTIVE_TASK_MAX_CHARS:
                 # Past the cap, drop a gateway reply quote first so elision cannot keep the quote
-                # and cut the request; the split-turn gate measures the same authored text.
+                # and cut the request.
                 text = _redact_compaction_text(_authored_request_text(msg.get("content"))) or text
             text = re.sub(r"\s+", " ", text)
             # Elide AFTER repr: repr would escape the marker's "Hermes's" and hide a copy from the
-            # guard. Authored text within the cap stays whole (the split-turn path relies on that).
+            # guard. Authored text within the cap stays whole; a longer request split out of an
+            # oversized turn is restated verbatim by _reappend_inflight_user_task, not by this snapshot.
             text = repr(text) if len(text) <= _ACTIVE_TASK_MAX_CHARS else elide(repr(text), _ACTIVE_TASK_MAX_CHARS)
             return (
                 f"User asked (deterministic, from compacted turns): {text}\n"
@@ -5005,6 +5040,46 @@ Write only the summary body. Do not include any preamble or prefix."""
             )
         drop_stale_api_content(replay)
 
+        # The replay is a replacement for the in-flight row, not an additional
+        # occurrence of it. When the original survived in the protected head,
+        # retaining it gives the durable transcript two active rows with the
+        # same message_uid and renders the request twice after reload.
+        from agent.message_metadata import MESSAGE_UID, message_uid_or_none, record_absorbed_message
+
+        if replay_uid := message_uid_or_none(replay):
+            before = len(compressed)
+            kept = list(compressed)
+            compressed[:] = [
+                msg
+                for msg in compressed
+                if not (
+                    msg is not carrier
+                    and msg.get("role") == "user"
+                    and msg.get(MESSAGE_UID) == replay_uid
+                )
+            ]
+            # When the removed row opened the window, the head's tool flow
+            # (assistant tool_calls) would now lead; native Gemini rejects a
+            # leading model functionCall turn. Open the window on the carrier.
+            first = next(i for i, msg in enumerate(compressed) if msg.get("role") != "system")
+            if len(compressed) != before and compressed[first].get("role") != "user":
+                if _template_visible_role(carrier) is None:
+                    # Carrier merged into a tail assistant(tool_calls) row:
+                    # moving it would split it from its tool results. Keep
+                    # the head row this cycle (pre-dedup layout).
+                    compressed[:] = kept
+                else:
+                    compressed.insert(first, compressed.pop(compressed.index(carrier)))
+            # The summary role was picked against a head that ended on the row
+            # just removed: an assistant carrier would now open the visible
+            # sequence (or follow an assistant). Use the _force_user_leading
+            # layout instead — carrier role=user, request after its end marker.
+            if len(compressed) != before and _template_visible_role(carrier) == "assistant" and (
+                _last_template_visible_role(compressed[: compressed.index(carrier)]) != "user"
+            ):
+                carrier["role"] = "user"
+                last_visible_role = _last_template_visible_role(compressed)
+
         if last_visible_role == "user":
             # Alternation is judged on template-visible rows only (tool_calls /
             # tool rows are exempt), so a user-pinned summary followed by a
@@ -5020,8 +5095,6 @@ Write only the summary body. Do not include any preamble or prefix."""
             )
             drop_stale_api_content(carrier)
             # The carrier absorbed a durable user turn: record its uid (merge witness).
-            from agent.message_metadata import record_absorbed_message
-
             record_absorbed_message(carrier, inflight)
             return compressed
 
@@ -5155,9 +5228,8 @@ Write only the summary body. Do not include any preamble or prefix."""
             # A single oversized user message is indivisible and must stay verbatim in the tail; this
             # exception is only for aggregate turn growth after a normally sized opening request.
             and _estimate_msg_budget_tokens(messages[last_user_idx]) <= soft_ceiling
-            # Measure what the user wrote: a gateway reply pointer quotes another message and
-            # would otherwise disable the split for a short reply to a long answer.
-            and len(_authored_request_text(messages[last_user_idx].get("content"))) <= _ACTIVE_TASK_MAX_CHARS
+            # The token ceiling is the only size guard: the request is restated verbatim after the
+            # handoff, so a character cap only pinned long requests (e.g. /goal prompts) in place.
             # Only split when there is real turn body to summarize: if the oversized weight is the
             # active turn's own newest group, the pre-anchor cut retains it anyway, so taking the
             # active request out of the tail buys no reclaim and loses the #10896 anchor.
@@ -5181,7 +5253,28 @@ Write only the summary body. Do not include any preamble or prefix."""
         # An older visible assistant reply can precede the active user turn; under the split above,
         # pulling back to it would undo the bounded exception.
         if not split_oversized_turn:
-            cut_idx = self._ensure_last_assistant_message_in_tail(messages, cut_idx, head_end)
+            asst_anchored_cut = self._ensure_last_assistant_message_in_tail(messages, cut_idx, head_end)
+            # The assistant anchor needs the same bound the user anchor got in #80449. In a long
+            # agentic turn whose assistant rows only carry tool_calls (no text reply yet), the
+            # newest text-bearing assistant is the PREVIOUS turn's closer: anchoring to it retains
+            # the whole oversized active turn, the middle collapses to nothing, and the session
+            # wedges in no_progress (#131412). When the anchored region holds tool-call bodies and is
+            # over the soft ceiling, keep the walk's tool-group-aligned cut instead.
+            if (
+                asst_anchored_cut < cut_idx
+                and allow_split_turn
+                and any(messages[i].get("tool_calls") for i in range(asst_anchored_cut, cut_idx))
+                # Priced like the walk (#84371): stale thinking the wire never carries must not trip it.
+                and sum(map(self._tail_row_pricer(messages), range(asst_anchored_cut, cut_idx))) > soft_ceiling
+            ):
+                if not self.quiet_mode:
+                    logger.debug(
+                        "Assistant reply anchor would retain an over-ceiling region; keeping "
+                        "tool-group-aligned cut at index %d instead of anchoring to %d (#131412)",
+                        cut_idx, asst_anchored_cut,
+                    )
+            else:
+                cut_idx = asst_anchored_cut
 
         # Optional multi-user anchor; n<=1 is gated here (not delegated): re-running the single-user anchor after
         # the assistant anchor could re-trigger its forward turn-pair push. Runs even under the split: the

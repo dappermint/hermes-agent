@@ -819,6 +819,19 @@ function Stage-Repository {
                 }
             }
             Disable-TreelessGraphWrites $InstallDir
+            # A treeless (tree:0) checkout from a late-September installer downloads whole
+            # directory snapshots again on every history walk (#129514). Fetch its trees once; the
+            # new filter is recorded only after that succeeds, so `hermes update` retries otherwise.
+            $partialFilter = Invoke-Native { git -C $InstallDir config --get remote.origin.partialclonefilter }
+            if ("$partialFilter".Trim() -eq 'tree:0') {
+                Invoke-Logged -MayFail "Fetching directory history once (treeless checkout)" { git -C $InstallDir -c gc.auto=0 -c maintenance.auto=false fetch --refetch --filter=blob:none origin "+refs/heads/${Branch}:refs/remotes/origin/${Branch}" }
+                if ($LASTEXITCODE) {
+                    Write-Warn "could not fetch the directory history; the next hermes update retries it"
+                } else {
+                    Invoke-Native { git -C $InstallDir config remote.origin.partialclonefilter blob:none }
+                    if ($LASTEXITCODE) { Write-Warn "could not record the blobless filter in $InstallDir" }
+                }
+            }
         }
         Invoke-Logged "Fetching origin/$Branch" { git -C $InstallDir fetch origin "+refs/heads/${Branch}:refs/remotes/origin/${Branch}" }
         if ($LASTEXITCODE) { Fail "git fetch failed" }
@@ -902,13 +915,14 @@ function Stage-Repository {
         try {
             $cloned = $false
             foreach ($attempt in 1..3) {
-                # Treeless: every commit and release tag (runtime identity is the
-                # nearest reachable release; -Commit pins and branch switches
-                # still resolve), trees and blobs fetched on demand, so the
-                # download stays close to a --depth 1 clone.
+                # Blobless: every commit, tree and release tag (runtime identity is
+                # the nearest reachable release; -Commit pins and branch switches
+                # still resolve), file contents fetched on demand. Not treeless:
+                # a long-lived treeless checkout re-downloads whole trees on every
+                # checkout and history walk (#129712).
                 $cloneLabel = "Cloning $RepoUrl ($Branch) into $InstallDir"
                 if ($attempt -gt 1) { $cloneLabel += " (attempt $attempt of 3)" }
-                Invoke-Logged $cloneLabel { git clone @progress --filter=tree:0 --branch $Branch $RepoUrl $tree }
+                Invoke-Logged $cloneLabel { git clone @progress --filter=blob:none --branch $Branch $RepoUrl $tree }
                 if (-not $LASTEXITCODE) { $cloned = $true; break }
                 Remove-Item -LiteralPath $tree -Recurse -Force -ErrorAction SilentlyContinue
                 if ($attempt -lt 3) { Start-Sleep -Seconds ($attempt * 5) }
@@ -917,7 +931,7 @@ function Stage-Repository {
                 # The checkout step is where throttled downloads die: clone the
                 # graph alone, then retry materializing the tree separately.
                 Write-Warn "direct clone failed; trying deferred checkout"
-                Invoke-Logged "Cloning history" { git clone @progress --filter=tree:0 --no-checkout --branch $Branch $RepoUrl $tree }
+                Invoke-Logged "Cloning history" { git clone @progress --filter=blob:none --no-checkout --branch $Branch $RepoUrl $tree }
                 if (-not $LASTEXITCODE) {
                     foreach ($attempt in 1..2) {
                         Invoke-Logged "Checking out files (attempt $attempt of 2)" { git -C $tree reset --hard HEAD }

@@ -47,6 +47,9 @@ CREATE_TIME_TOLERANCE_SECONDS = 2.0
 # Our own creation time re-probed by the same clock: only the marker's 3-decimal rounding differs,
 # while two processes are at least one scheduler tick (10 ms) apart.
 _OWN_CREATE_TIME_EPSILON = 0.005
+# macOS shells read a creation time from `ps -o lstart` and write it as whole seconds (`ct:N.000`),
+# truncated. A whole-second claim inside the second we started in is still our incarnation.
+_WHOLE_SECOND_CT = 1.0
 
 # A claim published by create-then-write (filesystems without hard links) is briefly empty; an
 # empty marker this young is a claim in flight, not a dead one (contract A3).
@@ -306,11 +309,9 @@ def _incarnation(pid: int, recorded: float | None, w: _World) -> bool | None:
             return recorded is None
         if recorded is None:
             return False
-        # When recorded was truncated to whole seconds (e.g. legacy shell or coarse probe where recorded % 1 == 0),
-        # it matches our incarnation if it falls within our process start second.
-        if recorded % 1 == 0 and int(w.ct) == int(recorded) and 0.0 <= (w.ct - recorded) < 1.0:
+        if abs(w.ct - recorded) <= _OWN_CREATE_TIME_EPSILON:
             return True
-        return abs(w.ct - recorded) <= _OWN_CREATE_TIME_EPSILON
+        return recorded.is_integer() and 0 <= w.ct - recorded < _WHOLE_SECOND_CT
     if not w.alive(pid):
         return False
     actual = None if recorded is None else w.ct_of(pid)

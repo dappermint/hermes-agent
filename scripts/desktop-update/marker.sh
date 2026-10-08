@@ -48,6 +48,16 @@ proc_ct() { # pid -> creation time (unix seconds, 3 decimals), or nothing
     [ -n "$start" ] && [ -n "$btime" ] && [ -n "$hz" ] || return 0
     awk -v b="$btime" -v s="$start" -v h="$hz" 'BEGIN{printf "%.3f\n", b + s / h}'
   elif [ "$(uname)" = "Darwin" ]; then
+    if command -v python3 >/dev/null 2>&1; then
+      ct="$(python3 -c '
+import ctypes, struct, sys
+b = bytearray(136)
+if ctypes.CDLL(None).proc_pidinfo(int(sys.argv[1]), 3, 0, (ctypes.c_char * 136).from_buffer(b), 136) == 136:
+    s, u = struct.unpack_from("<QQ", b, 120)
+    print(f"{s + u / 1e6:.3f}")
+' "$pid" 2>/dev/null)"
+      [ -n "$ct" ] && { printf '%s\n' "$ct"; return 0; }
+    fi
     # ps prints lstart in local time: render AND parse it in UTC so a DST
     # fall-back hour cannot shift the identity by 3600 s.
     lstart="$(TZ=UTC0 LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//')"

@@ -193,6 +193,15 @@ def _stdlib_create_time(pid: int) -> float | None:
         if sys.platform == "win32":
             ticks = _windows_create_filetime(pid)
             return None if ticks is None else (ticks - _FILETIME_UNIX_EPOCH) / 1e7
+        if sys.platform == "darwin":
+            try:
+                import ctypes, struct
+                b = bytearray(136)
+                if ctypes.CDLL(None).proc_pidinfo(int(pid), 3, 0, (ctypes.c_char * 136).from_buffer(b), 136) == 136:
+                    s, u = struct.unpack_from("<QQ", b, 120)
+                    return s + u / 1e6
+            except (OSError, AttributeError, ValueError):
+                pass
         if os.path.isdir("/proc"):
             with open(f"/proc/{pid}/stat", "rb") as fh:
                 stat = fh.read()
@@ -295,7 +304,13 @@ def _incarnation(pid: int, recorded: float | None, w: _World) -> bool | None:
     if pid == w.pid:  # we are alive by definition: only the incarnation is in question
         if w.ct is None:
             return recorded is None
-        return recorded is not None and abs(w.ct - recorded) <= _OWN_CREATE_TIME_EPSILON
+        if recorded is None:
+            return False
+        # When recorded was truncated to whole seconds (e.g. legacy shell or coarse probe where recorded % 1 == 0),
+        # it matches our incarnation if it falls within our process start second.
+        if recorded % 1 == 0 and int(w.ct) == int(recorded) and 0.0 <= (w.ct - recorded) < 1.0:
+            return True
+        return abs(w.ct - recorded) <= _OWN_CREATE_TIME_EPSILON
     if not w.alive(pid):
         return False
     actual = None if recorded is None else w.ct_of(pid)
@@ -1524,7 +1539,22 @@ class UpdateLock:
 
     @staticmethod
     def _is_partner(pid: int) -> bool:
-        return pid == os.getpid() or (pid and (pid == _handoff_pid() or _is_ancestor_pid(pid)))
+        if not pid:
+            return False
+        if pid == os.getpid():
+            return True
+        handoff = _handoff_pid()
+        if handoff:
+            if pid == handoff:
+                return True
+            try:
+                import psutil
+                if psutil.Process(pid).ppid() == handoff:
+                    return True
+            except Exception:
+                if _stdlib_parent_pid(pid) == handoff:
+                    return True
+        return _is_ancestor_pid(pid)
 
     def _adopt_or_refuse(self, existing: _Marker) -> bool:
         """C1 rule 4: a LIVE claim by us, an ancestor or the hand-off partner is run under.

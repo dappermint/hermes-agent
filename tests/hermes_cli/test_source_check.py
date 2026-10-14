@@ -44,7 +44,7 @@ def installation(tmp_path, monkeypatch):
     def git(*args, cwd=root):
         return subprocess.check_output([
             "git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-            "-c", "commit.gpgsign=false", *args,
+            "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", *args,
         ], cwd=cwd, text=True).strip()
 
     git("init", "-b", "main")

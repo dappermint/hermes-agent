@@ -5,6 +5,7 @@ Endpoint predicates, payload conversion and credentials live in ``agent/anthropi
 message_convert,credentials}.py``; import them from there."""
 
 from pm import install_hint
+import gzip
 import logging
 import math
 import os
@@ -431,6 +432,28 @@ def _build_anthropic_client_with_bearer_hook(
     return _new_sdk_client(sdk, kwargs, headers, route=base_url)
 
 
+def _anthropic_gzip_compress_request(request: Any) -> None:
+    if request.method != "POST" or "content-encoding" in request.headers:
+        return
+    body = request.read()
+    if len(body) <= 1024:
+        return
+    import httpx
+    # ponytail: fixed gzip level 6; upgrade to level 1/3 if latency profiling warrants it.
+    compressed = gzip.compress(body)
+    request.stream = httpx.ByteStream(compressed)
+    request._content = compressed
+    request.headers["Content-Encoding"] = "gzip"
+    request.headers["Content-Length"] = str(len(compressed))
+
+
+def _attach_anthropic_gzip_compression(client: Any) -> None:
+    raw_client = getattr(client, "_client", None)
+    hooks = getattr(raw_client, "_event_hooks", None)
+    if isinstance(hooks, dict) and "request" in hooks:
+        hooks["request"].append(_anthropic_gzip_compress_request)
+
+
 def _new_sdk_client(sdk, kwargs: dict[str, Any], headers: dict[str, str], route: str | None = None):
     """``sdk.Anthropic(**kwargs)`` with ``headers`` attached, sending exactly ONE credential.
     ``route`` is the caller's un-normalized base_url (the ``/v1`` form ``custom_providers`` entries are
@@ -438,7 +461,7 @@ def _new_sdk_client(sdk, kwargs: dict[str, Any], headers: dict[str, str], route:
 
     The SDK fills whichever of ``api_key`` / ``auth_token`` we left unset from ANTHROPIC_API_KEY /
     ANTHROPIC_AUTH_TOKEN in the environment (both loaded from ~/.hermes/.env) and then sends dual
-    auth — x-api-key *and* Authorization: Bearer — shipping a foreign credential to Portal / MiniMax
+    auth — x-api-key *and* Authorization: Bearer *** shipping a foreign credential to Portal / MiniMax
     / OAuth / Entra / third-party endpoints (#26970, #105774). An ``Omit()`` default header is the
     SDK-sanctioned way to drop the other header, and unlike an attribute clear it survives
     ``with_options()``, which re-runs the constructor and re-reads the environment."""
@@ -453,7 +476,11 @@ def _new_sdk_client(sdk, kwargs: dict[str, Any], headers: dict[str, str], route:
     merged.update(_custom_provider_extra_headers(route or kwargs.get("base_url")))
     if merged:
         kwargs["default_headers"] = merged
-    return sdk.Anthropic(**kwargs)
+    client = sdk.Anthropic(**kwargs)
+    effective_base_url = route or kwargs.get("base_url")
+    if is_native_anthropic_host(effective_base_url) and os.environ.get("CLAUDE_CODE_GZIP_REQUEST_BODIES", "").strip() != "0" and os.environ.get("HERMES_ANTHROPIC_GZIP_REQUEST_BODIES", "").strip() != "0":
+        _attach_anthropic_gzip_compression(client)
+    return client
 
 
 def _custom_provider_extra_headers(base_url) -> dict[str, str]:

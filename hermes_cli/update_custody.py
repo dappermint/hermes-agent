@@ -57,8 +57,15 @@ GIT_NO_DETACH = ("-c", "gc.autoDetach=false", "-c", "maintenance.auto=false")
 # credential-cache--daemon` holding the fd for its lifetime (900 s by default, m3). No repository
 # hooks either (F1): a hook inherits the fd, and one that backgrounds a process (a post-merge
 # daemon) kept a completed update's checkout locked until it exited. Per command only: the
-# repository's own hook configuration is untouched.
-_MUTATOR_CONFIG = ("-c", "core.fsmonitor=false", "-c", "credential.helper=", "-c", f"core.hooksPath={os.devnull}")
+# repository's own hook configuration is untouched. Automated mutators also neutralize
+# commit/tag signing so background updates don't stall or fail when no agent/TTY is available.
+_MUTATOR_CONFIG = (
+    "-c", "core.fsmonitor=false",
+    "-c", "credential.helper=",
+    "-c", f"core.hooksPath={os.devnull}",
+    "-c", "commit.gpgsign=false",
+    "-c", "tag.gpgsign=false",
+)
 
 # git subcommands that write the worktree, the index or refs on THIS machine. Only these inherit
 # the checkout lock fd: if the updater dies mid-command, the checkout stays locked until git exits.

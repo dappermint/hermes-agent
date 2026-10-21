@@ -66,6 +66,14 @@ def test_every_updater_git_runner_forbids_detached_children(repo):
     assert not missing, f"updater git runners that may fork a detached gc/maintenance child: {missing}"
 
 
+def test_mutator_config_disables_gpg_signing():
+    from hermes_cli.update_custody import git_argv
+    argv = git_argv(["git"], ["commit", "-m", "msg"])
+    assert "commit.gpgsign=false" in argv
+    assert "tag.gpgsign=false" in argv
+
+
+
 # Records whether the checkout lock file is among this process's open fds, then hands over.
 _RECORDER = textwrap.dedent("""\
     #!/bin/sh

@@ -867,8 +867,12 @@ def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha, *, target_r
             f"merging origin/{branch} instead of resetting so local commits survive...")
         # Best-effort safety tag as a recovery anchor.
         _git_run(git_cmd, ["tag", f"pre-update-{_time.strftime('%Y%m%d-%H%M%S')}"])
-        if _git_run(git_cmd, ["merge", "--no-edit", merge_ref]).returncode != 0:
+        merge_res = _git_run(git_cmd, ["merge", "--no-edit", merge_ref])
+        if merge_res.returncode != 0:
             _git_run(git_cmd, ["merge", "--abort"])
+            detail = (merge_res.stderr or merge_res.stdout or "").strip()
+            if detail:
+                print(f"  {detail}")
             print("✗ Merge conflict between local commits and upstream — update stopped, nothing was changed.")
             print(f"  Resolve manually: cd {_m().PROJECT_ROOT} && git merge origin/{branch}")
             print("  Then re-run the update. Local work is untouched.")

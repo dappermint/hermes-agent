@@ -52,9 +52,15 @@ def _json(value):
     if not isinstance(value, dict):
         raise RuntimeStoreError('invalid_params')
     try:
-        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
     except (TypeError, ValueError, UnicodeError) as exc:
         raise RuntimeStoreError('invalid_params') from exc
+    try:
+        encoded.encode('utf-8')
+    except UnicodeEncodeError:
+        # clients slicing at UTF-16 offsets send split emoji; sqlite refuses lone surrogates
+        encoded = encoded.encode('utf-16', 'surrogatepass').decode('utf-16', 'replace')
+    return encoded
 
 
 def _epoch(conn, epoch):

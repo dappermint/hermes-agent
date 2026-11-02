@@ -1053,6 +1053,11 @@ class SessionStore(
                 decision.entry = entry
                 decision.needs_save = touch_activity or healed
                 decision.metadata_only_save = touch_activity and not healed
+                # Only creation wrote the receiving bot, and /reset, /new and switches copy it, so a
+                # route saved before the column existed stays NULL and its completions stay pending
+                # after a restart. Its next inbound turn records the bot that verifiably received it.
+                if touch_activity and entry.transport_profile is None:
+                    entry.transport_profile = transport_profile_of(source)
         return decision
 
     def _route_recover(

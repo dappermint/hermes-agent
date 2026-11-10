@@ -1505,9 +1505,6 @@ DEFAULT_CONFIG = {
             "keep": 2,  # retain last N regular snapshots
         },
     },
-    # Honcho memory plugin (plugin catalog) — ~/.honcho/config.json is the source of truth (apiKey,
-    # workspace, peerName, sessions, enabled); the plugin reads hermes-specific overrides from here.
-    "honcho": {},
     # IANA timezone (e.g. "Asia/Kolkata", "America/New_York"). Empty = server-local time.
     "timezone": "",
 
@@ -1673,7 +1670,7 @@ DEFAULT_CONFIG = {
         # Case-insensitive fnmatch globs against terminal commands; a match blocks even under --yolo / mode=off.
         # Quote in YAML when starting with * or containing {}/!/: e.g. "git push --force*".
         "deny": [],
-        # Who may answer a chat exec approval: ["*"] any admitted member; [] the requester + platform admins (+ listed ids).
+        # Who may answer a chat approval/slash confirm/clarify: ["*"] any admitted member; [] requester + admins (+ ids).
         "approvers": ["*"],
         # /reload-mcp confirms before rebuilding the MCP tool set (it invalidates the prompt cache). "Always Approve" → false.
         "mcp_reload_confirm": True,
@@ -2193,8 +2190,8 @@ DEFAULT_CONFIG = {
         "message_timestamps": {"enabled": False},
         # Max bytes of inbound image/audio/video the gateway buffers into RAM and caches to disk.
         # Media is read fully into memory first, so unbounded uploads (Discord Nitro: 500 MB) or
-        # huge remote URLs can OOM-kill constrained deployments. Enforced in
-        # gateway/platforms/base.py for every adapter. 0 = no cap. Default 128 MiB.
+        # huge remote URLs (incl. image URLs in agent replies) can OOM-kill constrained deployments.
+        # Enforced in gateway/platforms/base.py for every adapter. 0 = no cap. Default 128 MiB.
         "max_inbound_media_bytes": 134217728,
         # Let adapters read HTTP_PROXY/HTTPS_PROXY/NO_PROXY/SSL_CERT_FILE from the environment and
         # auto-detect generic/macOS system proxies. False when the gateway inherits a proxy it must

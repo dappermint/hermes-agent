@@ -232,6 +232,12 @@ process when they stop. The default `0` keeps the existing `Type=simple`
 behavior. This setting is Linux/systemd-only and does not treat an ordinary
 platform network disconnect as an event-loop failure.
 
+Under `Type=notify` the gateway reports ready only after every served profile's
+adapters connect, one profile at a time. Before each secondary profile's
+connect it sends systemd `EXTEND_TIMEOUT_USEC` for that connect's budget plus
+a margin. A large multi-profile boot can therefore run past systemd's default
+90 s start timeout, while a boot that stops making progress is still killed.
+
 ## Chat Commands (Inside Messaging)
 
 | Command | Description |
@@ -465,6 +471,8 @@ gateway:
 ```
 
 **Backward compat:** if `allow_admin_from` is not set for a scope, the tier split is disabled for that scope and every allowed user has full access. Existing installs keep working with no changes — opt in when you want the distinction.
+
+**Answering prompts counts as running the command.** Answering a dangerous-command approval is `/approve` or `/deny`, and answering a slash-command confirmation (`/reset`, `/reload-mcp`, …) runs that command. So in a gated scope a non-admin cannot answer them any other way either: typing a bare `yes` / `always`, a typed confirm reply, or tapping a native button (Telegram, Discord, Slack, Matrix, Feishu, Teams, WhatsApp Cloud, QQ Bot, relay) gets the same *⛔ /approve is admin-only here* note and the prompt stays pending for an admin. Adding `approve` (or `deny`, or the confirmed command) to `user_allowed_commands` lets members answer, exactly as it lets them type it. Clarify questions are not commands and are unaffected. A narrowed [`approvals.approvers`](../security.md#who-can-answer-an-approval-in-a-shared-chat-approvalsapprovers) takes precedence over this: then the requester, the listed ids and the admins answer.
 
 #### Inspecting your access
 

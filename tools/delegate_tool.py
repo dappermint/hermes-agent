@@ -576,6 +576,9 @@ def delegate_task(
     dispatch handle when running in the background."""
     if parent_agent is None:
         return tool_error("delegate_task requires a parent agent context.")
+    from tools.hosted_tool_policy import host_feature_refusal
+    if refusal := host_feature_refusal("delegation", "delegate_task"):  # /review reaches here outside a tool call
+        return tool_error(refusal)
 
     normalized_action = (action or "").strip().lower()
     if normalized_action in _CONTROL_ACTIONS:
@@ -953,4 +956,6 @@ registry.register(
     check_fn=check_delegate_requirements,
     emoji="🔀",
     dynamic_schema_overrides=_build_dynamic_schema_overrides,
+    # The single-task top-level shape, kept for old transcripts.
+    compat_args=("goal", "context", "images", "max_iterations", "output_schema", "role"),
 )
